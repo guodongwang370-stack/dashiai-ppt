@@ -8753,10 +8753,129 @@ refreshRailCatalog();
     const rect = el.getBoundingClientRect();
     return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
   }
+  function area(rect){
+    return Math.max(0, rect.width) * Math.max(0, rect.height);
+  }
   function overlap(a, b){
     const x = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
     const y = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
     return x * y;
+  }
+  function inflate(rect, pad){
+    return {
+      left: rect.left - pad,
+      top: rect.top - pad,
+      right: rect.right + pad,
+      bottom: rect.bottom + pad,
+      width: rect.width + pad * 2,
+      height: rect.height + pad * 2
+    };
+  }
+  function slideRect(slide){
+    return rectFor(slide);
+  }
+  function applySvgTranslate(el, dx, dy){
+    const prevX = Number(el.dataset.dashiSafeDx || 0);
+    const prevY = Number(el.dataset.dashiSafeDy || 0);
+    const nextX = Math.round((prevX + dx) * 10) / 10;
+    const nextY = Math.round((prevY + dy) * 10) / 10;
+    el.dataset.dashiSafeDx = String(nextX);
+    el.dataset.dashiSafeDy = String(nextY);
+    el.setAttribute('transform', `translate(${nextX} ${nextY})`);
+    el.dataset.dashiLayoutSafe = 'nudge';
+  }
+  function applyHtmlTranslate(el, dx, dy){
+    const prevX = Number(el.dataset.dashiSafeDx || 0);
+    const prevY = Number(el.dataset.dashiSafeDy || 0);
+    const nextX = Math.round((prevX + dx) * 10) / 10;
+    const nextY = Math.round((prevY + dy) * 10) / 10;
+    el.dataset.dashiSafeDx = String(nextX);
+    el.dataset.dashiSafeDy = String(nextY);
+    el.style.transform = `translate(${nextX}px, ${nextY}px)`;
+    el.style.position = el.style.position || 'relative';
+    el.dataset.dashiLayoutSafe = 'nudge';
+  }
+  function applyTranslate(el, dx, dy){
+    if(el.namespaceURI === SVG_NS) applySvgTranslate(el, dx, dy);
+    else applyHtmlTranslate(el, dx, dy);
+  }
+  function movedRect(rect, dx, dy){
+    return {
+      left: rect.left + dx,
+      top: rect.top + dy,
+      right: rect.right + dx,
+      bottom: rect.bottom + dy,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+  function outOfBoundsPenalty(rect, bounds){
+    return Math.max(0, bounds.left + 10 - rect.left) * 30
+      + Math.max(0, bounds.top + 10 - rect.top) * 30
+      + Math.max(0, rect.right - bounds.right + 10) * 30
+      + Math.max(0, rect.bottom - bounds.bottom + 10) * 30;
+  }
+  function visualNodes(slide){
+    return Array.from(slide.querySelectorAll('svg circle,svg rect,svg image,img,.dslot,[data-dashi-theme09-quadrant-node]'))
+      .filter(el => isVisible(el))
+      .map(el => ({ el, rect: inflate(rectFor(el), 5) }))
+      .filter(item => {
+        const a = area(item.rect);
+        const slideArea = area(slideRect(slide));
+        return item.rect.width >= 10 && item.rect.height >= 10 && a > 140 && a < slideArea * .12;
+      });
+  }
+  function textIsInsideOwnCircle(textEl, visualEl, textRect, visualRect){
+    const text = textOf(textEl);
+    if(text.length > 3) return false;
+    if(visualEl.tagName.toLowerCase() !== 'circle') return false;
+    const cx = textRect.left + textRect.width / 2;
+    const cy = textRect.top + textRect.height / 2;
+    return cx > visualRect.left && cx < visualRect.right && cy > visualRect.top && cy < visualRect.bottom;
+  }
+  function reduceTextVisualCollisions(slide){
+    const bounds = slideRect(slide);
+    const visuals = visualNodes(slide);
+    if(!visuals.length) return;
+    const texts = Array.from(slide.querySelectorAll(TEXT_SELECTOR)).filter(isLeafText)
+      .filter(el => textOf(el).length >= 2)
+      .filter(el => !/^\d{1,2}$/.test(textOf(el)));
+    const placed = [];
+    for(const el of texts){
+      const base = rectFor(el);
+      const hitVisuals = visuals.filter(v => {
+        if(v.el.contains(el) || el.contains(v.el)) return false;
+        if(textIsInsideOwnCircle(el, v.el, base, v.rect)) return false;
+        const ratio = overlap(base, v.rect) / Math.max(1, Math.min(area(base), area(v.rect)));
+        return ratio > .08;
+      });
+      if(!hitVisuals.length) {
+        placed.push({ el, rect: base });
+        continue;
+      }
+      const shifts = [
+        [0, 0], [0, 14], [0, -14], [18, 0], [-18, 0],
+        [0, 28], [0, -28], [32, 0], [-32, 0],
+        [24, 18], [-24, 18], [24, -18], [-24, -18],
+        [0, 44], [0, -44]
+      ];
+      let best = { dx: 0, dy: 0, score: Infinity };
+      for(const [dx, dy] of shifts){
+        const candidate = movedRect(base, dx, dy);
+        let score = outOfBoundsPenalty(candidate, bounds);
+        for(const v of visuals) score += overlap(candidate, v.rect) * 8;
+        for(const other of placed) score += overlap(candidate, inflate(other.rect, 3)) * 5;
+        score += (Math.abs(dx) + Math.abs(dy)) * .35;
+        if(score < best.score) best = { dx, dy, score };
+      }
+      if(best.score < overlap(base, hitVisuals[0].rect) * 8) {
+        applyTranslate(el, best.dx, best.dy);
+        placed.push({ el, rect: movedRect(base, best.dx, best.dy) });
+      } else {
+        fitOverflow(el);
+        placed.push({ el, rect: rectFor(el) });
+      }
+    }
   }
   function sameTextBlock(a, b){
     return a.parentElement && a.parentElement === b.parentElement && Math.abs(rectFor(a).top - rectFor(b).top) < 3;
@@ -8782,12 +8901,152 @@ refreshRailCatalog();
     }
     return changed;
   }
+  function svgBBoxRect(el){
+    try {
+      const b = el.getBBox();
+      return { left: b.x, top: b.y, right: b.x + b.width, bottom: b.y + b.height, width: b.width, height: b.height };
+    } catch {
+      return null;
+    }
+  }
+  function svgOverlap(a, b){
+    if(!a || !b) return 0;
+    const x = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+    const y = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    return x * y;
+  }
+  function theme09QuadrantSafety(slide){
+    if(slide.dataset.vmLayout !== 'theme09_page045') return;
+    const svg = slide.querySelector('svg');
+    if(!svg) return;
+    const panel = svgBBoxRect(svg) || { left: 0, top: 0, right: 1500, bottom: 640, width: 1500, height: 640 };
+    const safe = { left: panel.left + 76, top: panel.top + 78, right: panel.right - 76, bottom: panel.bottom - 36 };
+
+    const axisFixes = [
+      ['工具生态弱', { x: 90, y: 602, anchor: 'start' }],
+      ['→ 工具生态强', { x: 1410, y: 602, anchor: 'end' }],
+      ['访问门槛高', { x: 90, y: 552, anchor: 'start' }],
+      ['↑ 落地门槛低', { x: 90, y: 104, anchor: 'start' }]
+    ];
+    for(const [label, cfg] of axisFixes){
+      const text = Array.from(svg.querySelectorAll('text')).find(el => textOf(el) === label);
+      if(text){
+        text.setAttribute('x', cfg.x);
+        text.setAttribute('y', cfg.y);
+        text.setAttribute('text-anchor', cfg.anchor);
+        text.setAttribute('dominant-baseline', 'middle');
+      }
+    }
+
+    const groups = Array.from(svg.querySelectorAll('g')).map(group => {
+      const name = group.querySelector('[data-dashi-theme09-quadrant-name]');
+      const node = group.querySelector('[data-dashi-theme09-quadrant-node]');
+      if(!name || !node) return null;
+      const cx = Number(node.getAttribute('cx'));
+      const cy = Number(node.getAttribute('cy'));
+      const r = Number(node.getAttribute('r'));
+      if(!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(r)) return null;
+      return { group, name, node, cx, cy, r };
+    }).filter(Boolean);
+    if(groups.length < 2) return;
+
+    const circleRects = groups.map(item => ({
+      item,
+      rect: {
+        left: item.cx - item.r - 13,
+        top: item.cy - item.r - 13,
+        right: item.cx + item.r + 13,
+        bottom: item.cy + item.r + 13,
+        width: item.r * 2 + 26,
+        height: item.r * 2 + 26
+      }
+    }));
+    const placed = [];
+    for(const item of groups){
+      const candidates = [
+        { x: item.cx, y: item.cy + item.r + 32, anchor: 'middle', cost: 0 },
+        { x: item.cx, y: item.cy - item.r - 18, anchor: 'middle', cost: 8 },
+        { x: item.cx + item.r + 24, y: item.cy + 8, anchor: 'start', cost: 12 },
+        { x: item.cx - item.r - 24, y: item.cy + 8, anchor: 'end', cost: 12 },
+        { x: item.cx + item.r + 22, y: item.cy + item.r + 20, anchor: 'start', cost: 18 },
+        { x: item.cx - item.r - 22, y: item.cy + item.r + 20, anchor: 'end', cost: 18 },
+        { x: item.cx + item.r + 22, y: item.cy - item.r - 10, anchor: 'start', cost: 20 },
+        { x: item.cx - item.r - 22, y: item.cy - item.r - 10, anchor: 'end', cost: 20 }
+      ];
+      let best = null;
+      const original = {
+        x: item.name.getAttribute('x'),
+        y: item.name.getAttribute('y'),
+        anchor: item.name.getAttribute('text-anchor') || 'middle'
+      };
+      for(const candidate of candidates){
+        item.name.setAttribute('x', candidate.x);
+        item.name.setAttribute('y', candidate.y);
+        item.name.setAttribute('text-anchor', candidate.anchor);
+        item.name.setAttribute('dominant-baseline', 'middle');
+        const rect = svgBBoxRect(item.name);
+        if(!rect) continue;
+        const padded = {
+          left: rect.left - 8,
+          top: rect.top - 8,
+          right: rect.right + 8,
+          bottom: rect.bottom + 8,
+          width: rect.width + 16,
+          height: rect.height + 16
+        };
+        let score = candidate.cost;
+        score += Math.max(0, safe.left - padded.left) * 20;
+        score += Math.max(0, safe.top - padded.top) * 20;
+        score += Math.max(0, padded.right - safe.right) * 20;
+        score += Math.max(0, padded.bottom - safe.bottom) * 20;
+        for(const other of circleRects){
+          if(other.item === item) continue;
+          score += svgOverlap(padded, other.rect) * 20;
+        }
+        for(const other of placed) score += svgOverlap(padded, other.rect) * 12;
+        if(!best || score < best.score) best = { ...candidate, rect: padded, score };
+      }
+      if(best){
+        item.name.setAttribute('x', best.x);
+        item.name.setAttribute('y', best.y);
+        item.name.setAttribute('text-anchor', best.anchor);
+        item.name.setAttribute('dominant-baseline', 'middle');
+        item.name.setAttribute('stroke', 'rgba(5,11,34,.72)');
+        item.name.setAttribute('stroke-width', '5');
+        item.name.setAttribute('paint-order', 'stroke');
+        placed.push({ item, rect: best.rect });
+      } else {
+        item.name.setAttribute('x', original.x);
+        item.name.setAttribute('y', original.y);
+        item.name.setAttribute('text-anchor', original.anchor);
+      }
+    }
+  }
+  function theme09CoverApertureSafety(slide){
+    if(slide.dataset.vmLayout !== 'theme09_page005') return;
+    const texts = Array.from(slide.querySelectorAll('*')).filter(el => isLeafText(el));
+    const year = texts.find(el => /^\d{4}$/.test(textOf(el)) && fontSize(el) >= 70);
+    if(!year) return;
+    const yr = rectFor(year);
+    for(const el of texts){
+      if(el === year) continue;
+      const txt = textOf(el);
+      if(!txt || txt.length > 8) continue;
+      const r = rectFor(el);
+      const nearYearBottom = Math.abs(r.top - yr.bottom) < 22 && r.left < yr.right && r.right > yr.left;
+      if(nearYearBottom) applyTranslate(el, 0, 18);
+    }
+  }
   function applySlide(slide){
+    theme09QuadrantSafety(slide);
+    theme09CoverApertureSafety(slide);
     const nodes = Array.from(slide.querySelectorAll(TEXT_SELECTOR)).filter(isLeafText);
     nodes.forEach(fitOverflow);
+    reduceTextVisualCollisions(slide);
     for(let pass = 0; pass < 4; pass += 1){
       if(!reduceOverlaps(slide)) break;
       Array.from(slide.querySelectorAll(TEXT_SELECTOR)).filter(isLeafText).forEach(fitOverflow);
+      reduceTextVisualCollisions(slide);
     }
   }
   function applyAll(){
